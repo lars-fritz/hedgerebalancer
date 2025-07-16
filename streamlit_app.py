@@ -27,7 +27,7 @@ DAILY_VOLATILITY_FACTOR = st.sidebar.number_input(
     "Daily Volatility Factor (Sigma Factor)",
     min_value=0.0001,
     max_value=0.1,
-    value=0.001,
+    value=0.002,
     step=0.0001,
     format="%.4f",
     key="vol_factor"
