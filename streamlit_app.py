@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 # --- Set a random seed for reproducibility (for unique runs each time) ---
 # In Streamlit, we might want to fix the seed or allow user to change for consistent runs
-np.random.seed() # Using a fixed seed for consistent results across runs
+np.random.seed(42) # Using a fixed seed for consistent results across runs
 
 st.set_page_config(layout="wide")
 
@@ -50,7 +50,17 @@ TOTAL_SIMULATION_SECONDS = st.sidebar.number_input(
     step=3600,
     key="total_sim_seconds"
 )
-# FUNDING_RATE_PER_HOUR = 0.00001 # Funding rate (0.00001 per hour) - Removed
+
+# --- Fees Parameter (User Input) ---
+FEE_RATE = st.sidebar.number_input(
+    "Fee Rate (e.g., 0.003 for 0.3%)",
+    min_value=0.0,
+    max_value=0.1,
+    value=0.003, # Default to 0.3%
+    step=0.0001,
+    format="%.4f",
+    key="fee_rate_input"
+)
 
 st.sidebar.header("Liquidity Position & Hedge Parameters")
 
@@ -200,7 +210,7 @@ def initialize_total_position(total_usdc_value, ratio_r, p0_simulation_val, rela
 # --- Main Simulation Function ---
 def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
                    initial_total_usdc, hedge_ratio, relative_range_param,
-                   hedge_activation_threshold_perc):
+                   hedge_activation_threshold_perc, fee_rate):
 
     sigma_daily = p0_sim * daily_vol_factor
     num_steps = int(total_sim_s / time_step_s)
@@ -227,6 +237,7 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
     all_net_pnl_segment = []
     cumulative_total_value_path = []
     all_current_position_unrealized_value = []
+    all_fees_earned = [] # Renamed to reflect fees are earned
 
     rebalance_times = []
     rebalance_prices = []
@@ -245,12 +256,14 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
 
     segment_impermanent_loss = 0.0
     segment_hedge_pnl = 0.0
+    segment_fees = 0.0 # Initialize segment fees
 
     all_impermanent_losses_segment.append(0.0)
     all_total_hedge_pnl_segment.append(0.0)
     all_net_pnl_segment.append(0.0)
     cumulative_total_value_path.append(initial_total_usdc)
     all_current_position_unrealized_value.append(initial_total_usdc)
+    all_fees_earned.append(0.0)
 
 
     for i in range(num_steps):
@@ -268,9 +281,11 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
             rebalance_triggered = True
             rebalance_direction = "Down"
         
+        # Calculate IL for the current step based on the current position's p0
         il_at_step, _, _ = calculate_il(current_L, current_p0_lp, current_p_max_lp, current_p_min_lp, p_current)
         segment_impermanent_loss = il_at_step
 
+        # Calculate hedge PnL for the current step (relative to current position's hedge activation)
         step_hedge_pnl = 0.0
         if p_current > current_p_up_threshold:
             step_hedge_pnl += current_x_A_hedge_target * (p_current - current_p_up_threshold)
@@ -280,14 +295,36 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
                 step_hedge_pnl += hype_shorted_for_down_hedge * (current_p_down_threshold - p_current)
 
         segment_hedge_pnl = step_hedge_pnl
-        net_pnl_current_segment = segment_hedge_pnl - segment_impermanent_loss
+
+        # --- Fee Calculation ---
+        # Calculate USDC amount before the price change
+        usdc_before_step = calculate_xB(p_previous, current_L, current_p_min_lp)
+        # Calculate USDC amount after the price change
+        usdc_after_step = calculate_xB(p_current, current_L, current_p_min_lp)
+        
+        # Volume is the absolute change in USDC tokens that entered or left the LP
+        volume_usdc = abs(usdc_after_step - usdc_before_step)
+        step_fee = volume_usdc * fee_rate
+        segment_fees += step_fee # Accumulate fees within the segment
+
+        # Calculate Net PnL for the current segment (Hedge - IL + Fees)
+        net_pnl_current_segment = segment_hedge_pnl - segment_impermanent_loss + segment_fees # Fees are added
+
+        # Calculate current position's unrealized value
         current_position_unrealized_value_at_step = current_total_usdc_value + net_pnl_current_segment
 
+
         if rebalance_triggered:
+            st.write(f"\n--- Rebalance Triggered at Time: {current_time}, Price: {p_current:.2f} ({rebalance_direction}) ---")
+            
             current_total_usdc_value = current_total_usdc_value + net_pnl_current_segment
+            
             rebalance_times.append(current_time)
             rebalance_prices.append(p_current)
             rebalance_new_values.append(current_total_usdc_value)
+
+            st.write(f"Net PnL of previous segment: {net_pnl_current_segment:.4f} USDC")
+            st.write(f"New Total USDC Value for next position: {current_total_usdc_value:.4f} USDC")
 
             current_p0_lp = p_current
             current_p_up_threshold = current_p0_lp * (1 + hedge_activation_threshold_perc)
@@ -304,8 +341,17 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
                 current_p0_lp, current_p_min_lp, current_p_max_lp, current_p_up_threshold, current_p_down_threshold, current_L
             )
 
+            st.write(f"New LP p0: {current_p0_lp:.2f}")
+            st.write(f"New LP Range: [{current_p_min_lp:.2f}, {current_p_max_lp:.2f}]")
+            st.write(f"New Derived L: {current_L:.4f}")
+            st.write(f"New Target HYPE for Upward Hedge: {current_x_A_hedge_target:.4f} HYPE")
+            st.write(f"New Target USDC for Downward Hedge: {current_x_B_hedge_target:.4f} USDC")
+            st.write(f"New Rebalance Trigger Up: {current_p_rebalance_up:.4f}")
+            st.write(f"New Rebalance Trigger Down: {current_p_rebalance_down:.4f}")
+
             segment_impermanent_loss = 0.0
             segment_hedge_pnl = 0.0
+            segment_fees = 0.0 # Reset fees for the new segment
             current_position_unrealized_value_at_step = current_total_usdc_value
 
         all_impermanent_losses_segment.append(segment_impermanent_loss)
@@ -313,11 +359,14 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
         all_net_pnl_segment.append(net_pnl_current_segment)
         cumulative_total_value_path.append(current_total_usdc_value)
         all_current_position_unrealized_value.append(current_position_unrealized_value_at_step)
+        all_fees_earned.append(segment_fees) # Append fees earned
+
 
     return (price_path_simulated, time_stamps_simulated, all_impermanent_losses_segment,
             all_total_hedge_pnl_segment, all_net_pnl_segment, cumulative_total_value_path,
-            all_current_position_unrealized_value, rebalance_times, rebalance_prices,
-            rebalance_new_values, current_total_usdc_value, initial_total_usdc,
+            all_current_position_unrealized_value, all_fees_earned, # Pass all_fees_earned
+            rebalance_times, rebalance_prices, rebalance_new_values,
+            current_total_usdc_value, initial_total_usdc,
             p0_sim, sigma_daily, current_p_min_lp, current_p_max_lp,
             current_p_up_threshold, current_p_down_threshold)
 
@@ -326,18 +375,30 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
 if st.sidebar.button("Run Simulation"):
     (price_path_simulated, time_stamps_simulated, all_impermanent_losses_segment,
      all_total_hedge_pnl_segment, all_net_pnl_segment, cumulative_total_value_path,
-     all_current_position_unrealized_value, rebalance_times, rebalance_prices,
-     rebalance_new_values, final_total_usdc_value, initial_total_usdc,
+     all_current_position_unrealized_value, all_fees_earned, # Receive all_fees_earned
+     rebalance_times, rebalance_prices, rebalance_new_values,
+     final_total_usdc_value, initial_total_usdc,
      p0_sim, sigma_daily, p_min_position, p_max_position,
      p_up_threshold, p_down_threshold) = \
         run_simulation(p0_simulation_input, DAILY_VOLATILITY_FACTOR, TIME_STEP_SECONDS, TOTAL_SIMULATION_SECONDS,
                        INITIAL_TOTAL_USDC_VALUE, HEDGE_RATIO_R, RELATIVE_RANGE,
-                       HEDGE_ACTIVATION_THRESHOLD_PERCENTAGE)
+                       HEDGE_ACTIVATION_THRESHOLD_PERCENTAGE, FEE_RATE)
 
     st.subheader("Simulation Results")
     st.write(f"**Initial Total USDC Value:** {initial_total_usdc:.4f} USDC")
     st.write(f"**Final Total USDC Value (after all rebalances):** {final_total_usdc_value:.4f} USDC")
     st.write(f"**Total Number of Rebalances:** {len(rebalance_times)}")
+    st.write(f"**Total Fees Earned:** {np.sum(all_fees_earned):.4f} USDC") # Sum all fees earned across segments
+
+    # Calculate APR
+    simulation_duration_days = TOTAL_SIMULATION_SECONDS / (24 * 3600)
+    if initial_total_usdc > 0 and simulation_duration_days > 0:
+        # APR = ((Final Value / Initial Value)^(365 / Simulation Duration in Days) - 1 ) * 100
+        apr = ((final_total_usdc_value / initial_total_usdc)**(365 / simulation_duration_days) - 1) * 100
+        st.write(f"**Annual Percentage Rate (APR):** {apr:.2f}%")
+    else:
+        st.write("**Annual Percentage Rate (APR):** Cannot be calculated (Initial Value or Duration is zero).")
+
 
     # Plot 1: Simulated Price Path with LP Range and Rebalances
     fig1, ax1 = plt.subplots(figsize=(14, 7))
@@ -363,9 +424,10 @@ if st.sidebar.button("Run Simulation"):
     fig2, ax2 = plt.subplots(figsize=(14, 7))
     ax2.plot(time_stamps_simulated, all_impermanent_losses_segment, label='Impermanent Loss (IL - Current Segment)', color='orange', linestyle='-')
     ax2.plot(time_stamps_simulated, all_total_hedge_pnl_segment, label='Total Hedge PnL (Current Segment)', color='green', linestyle='--')
-    ax2.plot(time_stamps_simulated, all_net_pnl_segment, label='Net PnL (Hedge - IL - Current Segment)', color='blue', linewidth=2)
+    ax2.plot(time_stamps_simulated, all_fees_earned, label='Total Fees Earned (Current Segment)', color='gray', linestyle=':') # Changed label to "Earned"
+    ax2.plot(time_stamps_simulated, all_net_pnl_segment, label='Net PnL (Hedge - IL + Fees - Current Segment)', color='blue', linewidth=2) # Changed to + Fees
     ax2.axhline(y=0, color='black', linestyle='--', linewidth=0.8)
-    ax2.set_title('Segment-Specific PnL: Impermanent Loss, Hedge PnL, and Net PnL Over Time (in USDC)')
+    ax2.set_title('Segment-Specific PnL: Impermanent Loss, Hedge PnL, Fees, and Net PnL Over Time (in USDC)')
     ax2.set_xlabel('Time')
     ax2.set_ylabel('Value (USDC)')
     ax2.grid(True)
