@@ -266,6 +266,7 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
     rebalance_times = []
     rebalance_prices = []
     rebalance_new_values = []
+    rebalance_details = [] # New list to store rebalance details for the table
 
     (current_L, current_hype_amount, current_usdc_amount,
      current_p_min_lp, current_p_max_lp, current_usdc_for_hedge,
@@ -340,7 +341,14 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
 
 
         if rebalance_triggered:
-            st.write(f"\n--- Rebalance Triggered at Time: {current_time}, Price: {p_current:.2f} ({rebalance_direction}) ---")
+            # Store rebalance details for the table
+            rebalance_details.append({
+                "Time": current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                "Price": f"{p_current:.2f}",
+                "Direction": rebalance_direction,
+                "Net PnL (Prev. Seg)": f"{net_pnl_current_segment:.4f}",
+                "New Total Value": f"{current_total_usdc_value + net_pnl_current_segment:.4f}"
+            })
             
             current_total_usdc_value = current_total_usdc_value + net_pnl_current_segment
             
@@ -348,8 +356,7 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
             rebalance_prices.append(p_current)
             rebalance_new_values.append(current_total_usdc_value)
 
-            st.write(f"Net PnL of previous segment: {net_pnl_current_segment:.4f} USDC")
-            st.write(f"New Total USDC Value for next position: {current_total_usdc_value:.4f} USDC")
+            # Removed st.write statements for rebalance details
 
             current_p0_lp = p_current
             current_p_up_threshold = current_p0_lp * (1 + hedge_activation_threshold_perc)
@@ -366,13 +373,7 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
                 current_p0_lp, current_p_min_lp, current_p_max_lp, current_p_up_threshold, current_p_down_threshold, current_L
             )
 
-            st.write(f"New LP p0: {current_p0_lp:.2f}")
-            st.write(f"New LP Range: [{current_p_min_lp:.2f}, {current_p_max_lp:.2f}]")
-            st.write(f"New Derived L: {current_L:.4f}")
-            st.write(f"New Target HYPE for Upward Hedge: {current_x_A_hedge_target:.4f} HYPE")
-            st.write(f"New Target USDC for Downward Hedge: {current_x_B_hedge_target:.4f} USDC")
-            st.write(f"New Rebalance Trigger Up: {current_p_rebalance_up:.4f}")
-            st.write(f"New Rebalance Trigger Down: {current_p_rebalance_down:.4f}")
+            # Removed st.write statements for new LP parameters
 
             # Reset segment PnL for the new position to reflect its fresh start
             segment_impermanent_loss = 0.0
@@ -397,7 +398,7 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
     return (price_path_simulated, time_stamps_simulated, all_impermanent_losses_segment,
             all_total_hedge_pnl_segment, all_net_pnl_segment, cumulative_total_value_path,
             all_current_position_unrealized_value, all_lp_rewards_segment, cumulative_lp_rewards_path,
-            rebalance_times, rebalance_prices, rebalance_new_values,
+            rebalance_times, rebalance_prices, rebalance_new_values, rebalance_details,
             current_total_usdc_value, initial_total_usdc, total_lp_rewards_accrued,
             p0_sim, sigma_daily, current_p_min_lp, current_p_max_lp,
             current_p_up_threshold, current_p_down_threshold)
@@ -408,7 +409,7 @@ if st.sidebar.button("Run Simulation"):
     (price_path_simulated, time_stamps_simulated, all_impermanent_losses_segment,
      all_total_hedge_pnl_segment, all_net_pnl_segment, cumulative_total_value_path,
      all_current_position_unrealized_value, all_lp_rewards_segment, cumulative_lp_rewards_path,
-     rebalance_times, rebalance_prices, rebalance_new_values,
+     rebalance_times, rebalance_prices, rebalance_new_values, rebalance_details,
      final_total_usdc_value, initial_total_usdc, total_lp_rewards_accrued,
      p0_sim, sigma_daily, p_min_position, p_max_position,
      p_up_threshold, p_down_threshold) = \
@@ -431,6 +432,14 @@ if st.sidebar.button("Run Simulation"):
         st.write(f"**Annual Percentage Rate (APR):** {apr:.2f}%")
     else:
         st.write("**Annual Percentage Rate (APR):** Cannot be calculated (Initial Value or Duration is zero).")
+
+    # Display Rebalance Details in a table
+    if rebalance_details:
+        st.subheader("Rebalance Events Summary")
+        rebalance_df = pd.DataFrame(rebalance_details)
+        st.dataframe(rebalance_df)
+    else:
+        st.write("No rebalance events occurred during this simulation.")
 
 
     # Plot 1: Simulated Price Path with LP Range and Rebalances
@@ -495,4 +504,5 @@ if st.sidebar.button("Run Simulation"):
     ax4.grid(True)
     ax4.legend()
     st.pyplot(fig4)
+
 
