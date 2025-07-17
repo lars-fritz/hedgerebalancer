@@ -260,7 +260,8 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
     all_net_pnl_segment = []
     cumulative_total_value_path = []
     all_current_position_unrealized_value = []
-    all_lp_rewards_segment = [] # New list for LP rewards
+    all_lp_rewards_segment = [] # New list for LP rewards (resets at rebalance)
+    cumulative_lp_rewards_path = [] # New list for cumulative LP rewards (never resets)
 
     rebalance_times = []
     rebalance_prices = []
@@ -280,8 +281,9 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
     segment_impermanent_loss = 0.0
     segment_hedge_pnl = 0.0
     segment_lp_rewards = 0.0 # Initialize segment LP rewards
+    total_lp_rewards_accrued = 0.0 # Initialize total LP rewards accrued across all segments
 
-    # Calculate reward rate per second based on initial LP capital
+    # Calculate reward rate per second based on initial LP capital for the *first* segment
     lp_capital_for_rewards_at_start_of_segment = current_total_usdc_value * (1 - hedge_ratio)
     reward_rate_per_second = (lp_capital_for_rewards_at_start_of_segment * lp_reward_apr / 100) / (365 * 24 * 3600)
 
@@ -292,6 +294,7 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
     cumulative_total_value_path.append(initial_total_usdc)
     all_current_position_unrealized_value.append(initial_total_usdc)
     all_lp_rewards_segment.append(0.0)
+    cumulative_lp_rewards_path.append(0.0) # Initial cumulative rewards
 
 
     for i in range(num_steps):
@@ -326,7 +329,8 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
 
         # --- LP Reward Calculation ---
         step_lp_reward = reward_rate_per_second * time_step_s
-        segment_lp_rewards += step_lp_reward # Accumulate LP rewards within the segment
+        segment_lp_rewards += step_lp_reward # Accumulate LP rewards within the current segment
+        total_lp_rewards_accrued += step_lp_reward # Accumulate total LP rewards across all segments
 
         # Calculate Net PnL for the current segment (Hedge - IL + LP Rewards)
         net_pnl_current_segment = segment_hedge_pnl - segment_impermanent_loss + segment_lp_rewards
@@ -387,13 +391,14 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
         cumulative_total_value_path.append(current_total_usdc_value)
         all_current_position_unrealized_value.append(current_position_unrealized_value_at_step)
         all_lp_rewards_segment.append(segment_lp_rewards)
+        cumulative_lp_rewards_path.append(total_lp_rewards_accrued)
 
 
     return (price_path_simulated, time_stamps_simulated, all_impermanent_losses_segment,
             all_total_hedge_pnl_segment, all_net_pnl_segment, cumulative_total_value_path,
-            all_current_position_unrealized_value, all_lp_rewards_segment,
+            all_current_position_unrealized_value, all_lp_rewards_segment, cumulative_lp_rewards_path,
             rebalance_times, rebalance_prices, rebalance_new_values,
-            current_total_usdc_value, initial_total_usdc,
+            current_total_usdc_value, initial_total_usdc, total_lp_rewards_accrued,
             p0_sim, sigma_daily, current_p_min_lp, current_p_max_lp,
             current_p_up_threshold, current_p_down_threshold)
 
@@ -402,9 +407,9 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
 if st.sidebar.button("Run Simulation"):
     (price_path_simulated, time_stamps_simulated, all_impermanent_losses_segment,
      all_total_hedge_pnl_segment, all_net_pnl_segment, cumulative_total_value_path,
-     all_current_position_unrealized_value, all_lp_rewards_segment,
+     all_current_position_unrealized_value, all_lp_rewards_segment, cumulative_lp_rewards_path,
      rebalance_times, rebalance_prices, rebalance_new_values,
-     final_total_usdc_value, initial_total_usdc,
+     final_total_usdc_value, initial_total_usdc, total_lp_rewards_accrued,
      p0_sim, sigma_daily, p_min_position, p_max_position,
      p_up_threshold, p_down_threshold) = \
         run_simulation(p0_simulation_input, DAILY_VOLATILITY_FACTOR, TIME_STEP_SECONDS, TOTAL_SIMULATION_SECONDS,
@@ -415,7 +420,7 @@ if st.sidebar.button("Run Simulation"):
     st.write(f"**Initial Total USDC Value:** {initial_total_usdc:.4f} USDC")
     st.write(f"**Final Total USDC Value (after all rebalances):** {final_total_usdc_value:.4f} USDC")
     st.write(f"**Total Number of Rebalances:** {len(rebalance_times)}")
-    st.write(f"**Total LP Rewards Earned:** {np.sum(all_lp_rewards_segment):.4f} USDC")
+    st.write(f"**Total LP Rewards Earned (Cumulative):** {total_lp_rewards_accrued:.4f} USDC")
 
 
     # Calculate APR
@@ -473,3 +478,21 @@ if st.sidebar.button("Run Simulation"):
     ax3.grid(True)
     ax3.legend()
     st.pyplot(fig3)
+
+    # Plot 4: Cumulative LP Rewards Over Time
+    fig4, ax4 = plt.subplots(figsize=(14, 7))
+    ax4.plot(time_stamps_simulated, cumulative_lp_rewards_path, label='Cumulative LP Rewards', color='gold', linewidth=2)
+    for r_time, r_price, r_value in zip(rebalance_times, rebalance_prices, rebalance_new_values):
+        # Mark rebalance points on the cumulative rewards plot
+        # Find the index corresponding to the rebalance time
+        rebalance_idx = np.where(time_stamps_simulated == r_time)[0]
+        if len(rebalance_idx) > 0:
+            ax4.plot(r_time, cumulative_lp_rewards_path[rebalance_idx[0]], 'o', color='red', markersize=6, label=f'Rebalance @ {r_price:.2f}' if r_time == rebalance_times[0] else "") # Label only once
+
+    ax4.set_title('Cumulative LP Rewards Over Time (with Compounding Effect)')
+    ax4.set_xlabel('Time')
+    ax4.set_ylabel('Cumulative LP Rewards (USDC)')
+    ax4.grid(True)
+    ax4.legend()
+    st.pyplot(fig4)
+
