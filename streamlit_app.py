@@ -51,17 +51,6 @@ TOTAL_SIMULATION_SECONDS = st.sidebar.number_input(
     key="total_sim_seconds"
 )
 
-# --- Fees Parameter (User Input) ---
-# FEE_RATE = st.sidebar.number_input( # Removed fee rate input
-#     "Fee Rate (e.g., 0.003 for 0.3%)",
-#     min_value=0.0,
-#     max_value=0.1,
-#     value=0.003, # Default to 0.3%
-#     step=0.0001,
-#     format="%.4f",
-#     key="fee_rate_input"
-# )
-
 st.sidebar.header("Liquidity Position & Hedge Parameters")
 
 INITIAL_TOTAL_USDC_VALUE = st.sidebar.number_input(
@@ -101,6 +90,18 @@ HEDGE_ACTIVATION_THRESHOLD_PERCENTAGE = st.sidebar.number_input(
     format="%.3f",
     key="hedge_activation_threshold"
 )
+
+# --- LP Reward Parameter ---
+LP_REWARD_APR = st.sidebar.number_input(
+    "LP Reward APR (%)",
+    min_value=0.0,
+    max_value=1000.0,
+    value=50.0, # Default to 50% APR
+    step=1.0,
+    format="%.2f",
+    key="lp_reward_apr"
+)
+
 
 # Derived parameters from inputs
 P_UP_THRESHOLD = p0_simulation_input * (1 + HEDGE_ACTIVATION_THRESHOLD_PERCENTAGE)
@@ -176,19 +177,40 @@ def calculate_rebalance_triggers(p0_val, p_min_val, p_max_val, p_up_threshold_va
     return p_rebalance_up, p_rebalance_down
 
 def initialize_total_position(total_usdc_value, ratio_r, p0_simulation_val, relative_range_val, p_up_threshold_val, p_down_threshold_val):
+    if not (0 <= ratio_r <= 1):
+        raise ValueError("Ratio 'r' must be between 0 and 1.")
+
     usdc_for_lp = total_usdc_value * (1 - ratio_r)
     usdc_for_hedge = total_usdc_value * ratio_r
-    L_lp, hype_amount_lp, usdc_amount_lp, p_min_lp, p_max_lp = calculate_lp_position(usdc_for_lp, p0_simulation_val, relative_range_val)
-    _, max_il_up, max_il_down = calculate_il(L_lp, p0_simulation_val, p_max_lp, p_min_lp, p0_simulation_val)
-    
-    lever_upward_move = 0.0
-    if usdc_for_hedge > 0 and max_il_up > 0:
-        lever_upward_move = max(1.0, max_il_up / usdc_for_hedge)
-    
-    lever_downward_move = 0.0
-    if usdc_for_hedge > 0 and max_il_down > 0:
-        lever_downward_move = max(1.0, max_il_down / usdc_for_hedge)
 
+    L_lp, hype_amount_lp, usdc_amount_lp, p_min_lp, p_max_lp = \
+        calculate_lp_position(usdc_for_lp, p0_simulation_val, relative_range_val)
+    
+    # Calculate maximal IL at the boundaries using the calculate_il function
+    _, max_il_up, max_il_down = calculate_il(L_lp, p0_simulation_val, p_max_lp, p_min_lp, p0_simulation_val)
+
+    # Calculate hedge levers
+    lever_upward_move = 0.0
+    if usdc_for_hedge > 0:
+        if max_il_up > 0:
+            raw_lever_up = max_il_up / usdc_for_hedge
+            lever_upward_move = max(1.0, raw_lever_up)
+        else:
+            lever_upward_move = 0.0
+    else:
+        lever_upward_move = 0.0
+
+    lever_downward_move = 0.0
+    if usdc_for_hedge > 0:
+        if max_il_down > 0:
+            raw_lever_down = max_il_down / usdc_for_hedge
+            lever_downward_move = max(1.0, raw_lever_down)
+        else:
+            lever_downward_move = 0.0
+    else:
+        lever_downward_move = 0.0
+
+    # Calculate x_A_hedge_target (HYPE amount) for upward move
     x_A_hedge_target = 0.0
     if p_max_lp > p_up_threshold_val and p_up_threshold_val > 0:
         denominator_xa = (p_max_lp - p_up_threshold_val)
@@ -196,6 +218,7 @@ def initialize_total_position(total_usdc_value, ratio_r, p0_simulation_val, rela
             x_A_hedge_target = ((p_max_lp - np.sqrt(p0_simulation_val * p_max_lp)) / denominator_xa) * \
                                calculate_delta_xA_sell(p_max_lp, p0_simulation_val, L_lp)
     
+    # Calculate x_B_hedge_target (USDC amount) for downward move
     x_B_hedge_target = 0.0
     if p_min_lp < p_down_threshold_val and p_down_threshold_val > 0:
         denominator_xb = (1/p_min_lp - 1/p_down_threshold_val)
@@ -210,7 +233,7 @@ def initialize_total_position(total_usdc_value, ratio_r, p0_simulation_val, rela
 # --- Main Simulation Function ---
 def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
                    initial_total_usdc, hedge_ratio, relative_range_param,
-                   hedge_activation_threshold_perc): # Removed fee_rate parameter
+                   hedge_activation_threshold_perc, lp_reward_apr):
 
     sigma_daily = p0_sim * daily_vol_factor
     num_steps = int(total_sim_s / time_step_s)
@@ -237,7 +260,7 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
     all_net_pnl_segment = []
     cumulative_total_value_path = []
     all_current_position_unrealized_value = []
-    # all_fees_earned = [] # Removed
+    all_lp_rewards_segment = [] # New list for LP rewards
 
     rebalance_times = []
     rebalance_prices = []
@@ -256,14 +279,19 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
 
     segment_impermanent_loss = 0.0
     segment_hedge_pnl = 0.0
-    # segment_fees = 0.0 # Removed
+    segment_lp_rewards = 0.0 # Initialize segment LP rewards
+
+    # Calculate reward rate per second based on initial LP capital
+    lp_capital_for_rewards_at_start_of_segment = current_total_usdc_value * (1 - hedge_ratio)
+    reward_rate_per_second = (lp_capital_for_rewards_at_start_of_segment * lp_reward_apr / 100) / (365 * 24 * 3600)
+
 
     all_impermanent_losses_segment.append(0.0)
     all_total_hedge_pnl_segment.append(0.0)
     all_net_pnl_segment.append(0.0)
     cumulative_total_value_path.append(initial_total_usdc)
     all_current_position_unrealized_value.append(initial_total_usdc)
-    # all_fees_earned.append(0.0) # Removed
+    all_lp_rewards_segment.append(0.0)
 
 
     for i in range(num_steps):
@@ -296,15 +324,12 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
 
         segment_hedge_pnl = step_hedge_pnl
 
-        # --- Fee Calculation --- # Removed fee calculation block
-        # usdc_before_step = calculate_xB(p_previous, current_L, current_p_min_lp)
-        # usdc_after_step = calculate_xB(p_current, current_L, current_p_min_lp)
-        # volume_usdc = abs(usdc_after_step - usdc_before_step)
-        # step_fee = volume_usdc * fee_rate
-        # segment_fees += step_fee
+        # --- LP Reward Calculation ---
+        step_lp_reward = reward_rate_per_second * time_step_s
+        segment_lp_rewards += step_lp_reward # Accumulate LP rewards within the segment
 
-        # Calculate Net PnL for the current segment (Hedge - IL)
-        net_pnl_current_segment = segment_hedge_pnl - segment_impermanent_loss # Removed + segment_fees
+        # Calculate Net PnL for the current segment (Hedge - IL + LP Rewards)
+        net_pnl_current_segment = segment_hedge_pnl - segment_impermanent_loss + segment_lp_rewards
 
         # Calculate current position's unrealized value
         current_position_unrealized_value_at_step = current_total_usdc_value + net_pnl_current_segment
@@ -345,22 +370,28 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
             st.write(f"New Rebalance Trigger Up: {current_p_rebalance_up:.4f}")
             st.write(f"New Rebalance Trigger Down: {current_p_rebalance_down:.4f}")
 
+            # Reset segment PnL for the new position to reflect its fresh start
             segment_impermanent_loss = 0.0
             segment_hedge_pnl = 0.0
-            # segment_fees = 0.0 # Removed
+            segment_lp_rewards = 0.0 # Reset LP rewards for the new segment
             current_position_unrealized_value_at_step = current_total_usdc_value
+
+            # Recalculate reward rate per second based on new LP capital
+            lp_capital_for_rewards_at_start_of_segment = current_total_usdc_value * (1 - hedge_ratio)
+            reward_rate_per_second = (lp_capital_for_rewards_at_start_of_segment * lp_reward_apr / 100) / (365 * 24 * 3600)
+
 
         all_impermanent_losses_segment.append(segment_impermanent_loss)
         all_total_hedge_pnl_segment.append(segment_hedge_pnl)
         all_net_pnl_segment.append(net_pnl_current_segment)
         cumulative_total_value_path.append(current_total_usdc_value)
         all_current_position_unrealized_value.append(current_position_unrealized_value_at_step)
-        # all_fees_earned.append(segment_fees) # Removed
+        all_lp_rewards_segment.append(segment_lp_rewards)
 
 
     return (price_path_simulated, time_stamps_simulated, all_impermanent_losses_segment,
             all_total_hedge_pnl_segment, all_net_pnl_segment, cumulative_total_value_path,
-            all_current_position_unrealized_value, # Removed all_fees_earned
+            all_current_position_unrealized_value, all_lp_rewards_segment,
             rebalance_times, rebalance_prices, rebalance_new_values,
             current_total_usdc_value, initial_total_usdc,
             p0_sim, sigma_daily, current_p_min_lp, current_p_max_lp,
@@ -371,20 +402,21 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
 if st.sidebar.button("Run Simulation"):
     (price_path_simulated, time_stamps_simulated, all_impermanent_losses_segment,
      all_total_hedge_pnl_segment, all_net_pnl_segment, cumulative_total_value_path,
-     all_current_position_unrealized_value, # Removed all_fees_earned
+     all_current_position_unrealized_value, all_lp_rewards_segment,
      rebalance_times, rebalance_prices, rebalance_new_values,
      final_total_usdc_value, initial_total_usdc,
      p0_sim, sigma_daily, p_min_position, p_max_position,
      p_up_threshold, p_down_threshold) = \
         run_simulation(p0_simulation_input, DAILY_VOLATILITY_FACTOR, TIME_STEP_SECONDS, TOTAL_SIMULATION_SECONDS,
                        INITIAL_TOTAL_USDC_VALUE, HEDGE_RATIO_R, RELATIVE_RANGE,
-                       HEDGE_ACTIVATION_THRESHOLD_PERCENTAGE) # Removed FEE_RATE parameter
+                       HEDGE_ACTIVATION_THRESHOLD_PERCENTAGE, LP_REWARD_APR)
 
     st.subheader("Simulation Results")
     st.write(f"**Initial Total USDC Value:** {initial_total_usdc:.4f} USDC")
     st.write(f"**Final Total USDC Value (after all rebalances):** {final_total_usdc_value:.4f} USDC")
     st.write(f"**Total Number of Rebalances:** {len(rebalance_times)}")
-    # st.write(f"**Total Fees Earned:** {np.sum(all_fees_earned):.4f} USDC") # Removed
+    st.write(f"**Total LP Rewards Earned:** {np.sum(all_lp_rewards_segment):.4f} USDC")
+
 
     # Calculate APR
     simulation_duration_days = TOTAL_SIMULATION_SECONDS / (24 * 3600)
@@ -416,14 +448,14 @@ if st.sidebar.button("Run Simulation"):
     ax1.legend()
     st.pyplot(fig1)
 
-    # Plot 2: Segment-Specific PnL
+    # Plot 2: Segment-Specific PnL with LP Rewards
     fig2, ax2 = plt.subplots(figsize=(14, 7))
     ax2.plot(time_stamps_simulated, all_impermanent_losses_segment, label='Impermanent Loss (IL - Current Segment)', color='orange', linestyle='-')
     ax2.plot(time_stamps_simulated, all_total_hedge_pnl_segment, label='Total Hedge PnL (Current Segment)', color='green', linestyle='--')
-    # ax2.plot(time_stamps_simulated, all_fees_earned, label='Total Fees Earned (Current Segment)', color='gray', linestyle=':') # Removed
-    ax2.plot(time_stamps_simulated, all_net_pnl_segment, label='Net PnL (Hedge - IL - Current Segment)', color='blue', linewidth=2) # Changed to + Fees
+    ax2.plot(time_stamps_simulated, all_lp_rewards_segment, label='Total LP Rewards (Current Segment)', color='gold', linestyle=':') # New plot for LP Rewards
+    ax2.plot(time_stamps_simulated, all_net_pnl_segment, label='Net PnL (Hedge - IL + LP Rewards - Current Segment)', color='blue', linewidth=2)
     ax2.axhline(y=0, color='black', linestyle='--', linewidth=0.8)
-    ax2.set_title('Segment-Specific PnL: Impermanent Loss, Hedge PnL, and Net PnL Over Time (in USDC)') # Updated title
+    ax2.set_title('Segment-Specific PnL: Impermanent Loss, Hedge PnL, LP Rewards, and Net PnL Over Time (in USDC)')
     ax2.set_xlabel('Time')
     ax2.set_ylabel('Value (USDC)')
     ax2.grid(True)
