@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 # --- Set a random seed for reproducibility (for unique runs each time) ---
 # In Streamlit, we might want to fix the seed or allow user to change for consistent runs
-np.random.seed(42) # Using a fixed seed for consistent results across runs
+np.random.seed() # Using a fixed seed for consistent results across runs
 
 st.set_page_config(layout="wide")
 
