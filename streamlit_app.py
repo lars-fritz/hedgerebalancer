@@ -18,7 +18,7 @@ p0_simulation_input = st.sidebar.number_input(
     "Initial Price (P0_SIMULATION)",
     min_value=1.0,
     max_value=1000.0,
-    value=39.0,
+    value=47.0,
     step=0.1,
     format="%.2f",
     key="p0_sim"
@@ -27,7 +27,7 @@ DAILY_VOLATILITY_FACTOR = st.sidebar.number_input(
     "Daily Volatility Factor (Sigma Factor)",
     min_value=0.0001,
     max_value=0.1,
-    value=0.002,
+    value=0.0005,
     step=0.0001,
     format="%.4f",
     key="vol_factor"
