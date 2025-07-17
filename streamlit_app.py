@@ -356,8 +356,6 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
             rebalance_prices.append(p_current)
             rebalance_new_values.append(current_total_usdc_value)
 
-            # Removed st.write statements for rebalance details
-
             current_p0_lp = p_current
             current_p_up_threshold = current_p0_lp * (1 + hedge_activation_threshold_perc)
             current_p_down_threshold = current_p0_lp * (1 - hedge_activation_threshold_perc)
@@ -372,8 +370,6 @@ def run_simulation(p0_sim, daily_vol_factor, time_step_s, total_sim_s,
             current_p_rebalance_up, current_p_rebalance_down = calculate_rebalance_triggers(
                 current_p0_lp, current_p_min_lp, current_p_max_lp, current_p_up_threshold, current_p_down_threshold, current_L
             )
-
-            # Removed st.write statements for new LP parameters
 
             # Reset segment PnL for the new position to reflect its fresh start
             segment_impermanent_loss = 0.0
@@ -424,12 +420,17 @@ if st.sidebar.button("Run Simulation"):
     st.write(f"**Total LP Rewards Earned (Cumulative):** {total_lp_rewards_accrued:.4f} USDC")
 
 
-    # Calculate APR
+    # Calculate APRs
     simulation_duration_days = TOTAL_SIMULATION_SECONDS / (24 * 3600)
     if initial_total_usdc > 0 and simulation_duration_days > 0:
-        # APR = ((Final Value / Initial Value)^(365 / Simulation Duration in Days) - 1 ) * 100
-        apr = ((final_total_usdc_value / initial_total_usdc)**(365 / simulation_duration_days) - 1) * 100
-        st.write(f"**Annual Percentage Rate (APR):** {apr:.2f}%")
+        # Compound Annual Growth Rate (CAGR)
+        cagr_apr = ((final_total_usdc_value / initial_total_usdc)**(365 / simulation_duration_days) - 1) * 100
+        st.write(f"**Annual Percentage Rate (APR - Compounding):** {cagr_apr:.2f}%")
+
+        # Simple Annualized Return
+        simple_apr = ((final_total_usdc_value - initial_total_usdc) / initial_total_usdc) * (365 / simulation_duration_days) * 100
+        st.write(f"**Annual Percentage Rate (APR - Simple):** {simple_apr:.2f}%")
+
     else:
         st.write("**Annual Percentage Rate (APR):** Cannot be calculated (Initial Value or Duration is zero).")
 
@@ -453,7 +454,7 @@ if st.sidebar.button("Run Simulation"):
 
     for r_time, r_price, r_value in zip(rebalance_times, rebalance_prices, rebalance_new_values):
         ax1.axvline(x=r_time, color='red', linestyle=':', linewidth=1, alpha=0.7)
-        ax1.plot(r_time, r_price, 'o', color='red', markersize=6, label=f'Rebalance @ {r_price:.2f}' if r_time == rebalance_times[0] else "")
+        ax1.plot(r_time, r_price, 'o', color='red', markersize=6, label=f'Rebalance @ {r_price:.2f}' if r_time == rebalance_times[0] else "") # Label only once
 
     ax1.set_title('Simulated Price Path with Rebalance Events')
     ax1.set_xlabel('Time')
@@ -504,5 +505,3 @@ if st.sidebar.button("Run Simulation"):
     ax4.grid(True)
     ax4.legend()
     st.pyplot(fig4)
-
-
